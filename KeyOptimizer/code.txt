@@ -1,0 +1,2260 @@
+﻿package com.driftingsofa.nickgkg.terrablock;
+
+import com.driftingsofa.nickgkg.engine.Adventure;
+import com.driftingsofa.nickgkg.engine.Entity;
+import com.driftingsofa.nickgkg.engine.Input;
+import com.driftingsofa.nickgkg.engine.Log;
+import com.driftingsofa.nickgkg.engine.Nick;
+import com.driftingsofa.nickgkg.engine.Point2F;
+import com.driftingsofa.nickgkg.engine.Profiler;
+import com.driftingsofa.nickgkg.engine.Services;
+import com.driftingsofa.nickgkg.engine.Settings;
+import com.driftingsofa.nickgkg.engine.Time;
+import com.driftingsofa.nickgkg.modules.BlockMapModule;
+import com.driftingsofa.nickgkg.modules.InventoryModule;
+import com.driftingsofa.nickgkg.modules.PlayerModule;
+import com.driftingsofa.nickgkg.terrablock.Type.BlockType;
+import com.driftingsofa.nickgkg.terrablock.Type.UpdateSize;
+import com.driftingsofa.nickgkg.terrablock.blocks.Air;
+import com.driftingsofa.nickgkg.terrablock.blocks.Background;
+import com.driftingsofa.nickgkg.terrablock.blocks.Block;
+import com.driftingsofa.nickgkg.terrablock.blocks.BlockList;
+import com.driftingsofa.nickgkg.terrablock.blocks.Chest;
+import com.driftingsofa.nickgkg.terrablock.blocks.Sign;
+import com.driftingsofa.nickgkg.terrablock.items.Item;
+import com.driftingsofa.nickgkg.terrablock.items.ItemResources;
+
+import org.omg.CORBA.Environment;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.NoSuchElementException;
+
+public class TerrablockMapGenerator extends MapGenerator{
+  private String TAG = "TerrablockMapGenerator";
+  protected void createChunk(){
+    int start_offset = BlockMapModule.gW*3/4;
+    Position start = new Position(BlockMapModule.gW*(getChunkX()-1)+start_offset,(getChunkY()-1)*BlockMapModule.gH+start_offset);
+    Position end = start.getTranslation(new Position(), 1, 1, BlockMapModule.gW/2-1, BlockMapModule.gH/2-1);
+    int width = BlockMapModule.gW*3/2;
+    int height = BlockMapModule.gH*3/2;
+    
+    //Biome
+    LinearFunction biome = new LinearFunction(BlockMapModule.gW, 100, .2f, getChunkX()*BlockMapModule.gW, 1);
+    Position pos = start.clone();
+    for(int i=0;i<width;i++){
+      for(int j=0;j<height;j++){
+        setBiomeInt(pos,biome.get(i)/25);
+        pos.selfTranslation(0, 1);
+      }
+      pos.selfTranslation(1, 0);
+      pos.setY(start.getY());
+    }
+    int water_level = 80;
+    //Terrain
+    int maxTerrainHeight = 0;
+    LinearFunction terrain = new LinearFunction(BlockMapModule.gW, 100, .2f, getChunkX()*BlockMapModule.gW, 2);
+    pos = start.clone();
+    for(int i=0;i<width;i++){
+      int off = start_offset + i;
+      if(terrain.get(off-1) == terrain.get(off+1))
+        terrain.set(off,terrain.get(off-1));
+      pos.selfTranslation(1, 0);
+    }
+    pos = start.clone();
+    for(int i=0;i<width;i++){
+      int off = start_offset + i;
+      int terrainHeight = maxTerrainHeight+terrain.get(off);
+      int backTerrainHeight = Math.min(water_level,Math.min(Math.min(terrainHeight,maxTerrainHeight+terrain.get(off-1)),maxTerrainHeight+terrain.get(off+1)));
+      for(int j=0;j<height;j++){
+        if(pos.getY()>terrainHeight+3)
+          setBackground(pos, BlockList.stoneBackground);
+        else if(pos.getY()>backTerrainHeight-1)
+          setBackground(pos, getBiomeInt(pos)==0?BlockList.sandBackground:BlockList.dirtBackground);
+        else if(pos.getY()==backTerrainHeight-1){
+          setBackground(pos, getBiomeInt(pos)==0? BlockList.sandBackground : (getBiomeInt(pos)==3? BlockList.snowBackground : BlockList.grassBackground));
+          getMap().addUpdates(pos, UpdateSize.one, BlockType.lighting, 0);
+        }else{
+          setBackground(pos, BlockList.airBackground);
+          setLight(pos, 15);
+        }
+        if(pos.getY()>700)
+          setBlock(pos, BlockList.bedrock);
+        else if(pos.getY()>terrainHeight+4)
+          setBlock(pos, BlockList.stone);
+        else if(pos.getY()>terrainHeight)
+          setBlock(pos, getBiomeInt(pos)==0?BlockList.sand:BlockList.dirt);
+        else if(pos.getY()==terrainHeight)
+          setBlock(pos, getBiomeInt(pos)==0?BlockList.sand:(terrainHeight>water_level?BlockList.dirt:(getBiomeInt(pos)==3?BlockList.snow:BlockList.grass)));
+        else if(pos.getY()>-300)
+          setBlock(pos, BlockList.air);
+        else
+          setBlock(pos, BlockList.thinAir);
+        pos.selfTranslation(0, 1);
+      }
+      pos.selfTranslation(1, 0);
+      pos.setY(start.getY());
+    }
+    //Background stone
+    Structure back_circle = new Structure("mapGeneration/back_circle.txt");
+    pos = start.clone();
+    for(int i=0;i<width;i++){
+      for(int j=0;j<height;j++){
+        Float f = getRandomFloat(pos.getX(), pos.getY(), 271);
+        if(f>.96f){
+          back_circle.addStructure(getMap(), pos, getChunkX(), getChunkY(), new Block[]{f>.98f?BlockList.redStoneBackground:BlockList.blueStoneBackground},BlockList.stoneBackground,0);
+        }
+        pos.selfTranslation(0, 1);
+      }
+      pos.selfTranslation(1, 0);
+      pos.setY(start.getY());
+    }
+    //Caves
+    Structure[] circles = new Structure[9];
+    for(int i=0;i<circles.length;i++)
+      circles[i] = new Structure("mapGeneration/circle"+i+".txt");
+    final int caveChunkSize = 50;
+    final int cavePointsPerCaveChunk = 2;
+    final int caveLinksPerPoint = 2;
+    Position[][][] cavePoints = new Position[(int)Math.ceil((float)end.getX()/caveChunkSize) - (int)Math.floor((float)start.getX()/caveChunkSize)]
+        [(int)Math.ceil((float)end.getY()/caveChunkSize) - (int)Math.floor((float)start.getY()/caveChunkSize)][cavePointsPerCaveChunk];
+    for(int i=0;i<cavePoints.length;i++){
+      int x = (int)Math.floor((float)start.getX()/caveChunkSize) * caveChunkSize + i * caveChunkSize;
+      for(int j=0;j<cavePoints[0].length;j++){
+        int y = (int)Math.floor((float)start.getY()/caveChunkSize) * caveChunkSize + j * caveChunkSize;
+        for(int k=0;k<cavePoints[0][0].length;k++)
+          cavePoints[i][j][k] = new Position(x+(int)(getRandomFloat(x,y,20+k*2)*caveChunkSize),y+(int)(getRandomFloat(x,y,21+k*2)*caveChunkSize));
+      }
+    }
+    for(int i=1;i<cavePoints.length-1;i++){
+      int x = (int)Math.floor((float)start.getX()/caveChunkSize) * caveChunkSize + i * caveChunkSize;
+      for(int j=1;j<cavePoints[0].length-1;j++){
+        int y = (int)Math.floor((float)start.getY()/caveChunkSize) * caveChunkSize + j * caveChunkSize;
+        for(int k=0;k<cavePoints[0][0].length;k++)
+          for(int l=0;l<caveLinksPerPoint;l++){
+            Position a = cavePoints[i][j][k];
+            float random = getRandomFloat(x,y,30+l);
+            Position b = cavePoints[i+(int)(random*3)-1][j+(int)(random*9%3)-1][(int)(random*9%1*cavePointsPerCaveChunk)];
+            boolean xDir = Math.abs(b.getX()-a.getX()) > Math.abs(b.getY()-a.getY());
+            if(xDir?a.getX() > b.getX():a.getY() > b.getY()){
+              Position t = a;
+              a = b;
+              b = t;
+            }
+            if(a != b){
+              LinearFunction heightFunc = new LinearFunction((xDir?b.getX()-a.getX():b.getY()-a.getY())+1,0,.3f,(xDir?a:b).getY(),(xDir?b:a).getY(),(xDir?a:b).getX(),40+k*caveLinksPerPoint+l);
+              LinearFunction widthFunc = new LinearFunction((xDir?b.getX()-a.getX():b.getY()-a.getY())+1,7,0.1f,4,4,(xDir?a:b).getX(),50+k*caveLinksPerPoint+l);
+              int count = 0;
+              while(xDir?a.getX() <= b.getX():a.getY() <= b.getY()){
+                a.setY(heightFunc.get(count));
+                circles[1+widthFunc.get(count)].addStructure(getMap(), a, getChunkX(), getChunkY(), new Block[]{BlockList.air}, null, 0f);
+                count++;
+                a.selfTranslation(xDir?1:0, xDir?0:1);
+              }
+            }
+          }
+      }
+    }
+    //Liquids
+    //underground
+    for(int i=0;i<cavePoints.length;i++){
+      int x = (int)Math.floor((float)start.getX()/caveChunkSize) * caveChunkSize + i * caveChunkSize;
+      for(int j=0;j<cavePoints[0].length;j++){
+        int y = (int)Math.floor((float)start.getY()/caveChunkSize) * caveChunkSize + j * caveChunkSize;
+        for(int k=0;k<4*3;k+=4){
+          Position liquid = new Position(x + (int)(getRandomFloat(x, y, 300 + k)*caveChunkSize), y + (int)(getRandomFloat(x, y, 301 + k)*caveChunkSize));
+          int circle = (int)(getRandomFloat(x,y,302+k)*circles.length);
+          float cut_off = Nick.trim(.25f,1-(y-100f)/600f,1f);
+          Block block = getRandomFloat(x,y,303+k)<cut_off?BlockList.water:BlockList.lava;
+          circles[circle].addStructure(getMap(), liquid, getChunkX(), getChunkY(), new Block[]{block}, BlockList.stone, 0f);
+          Position it = liquid.clone();
+          for(int i_off=0;i_off<circle+1;i_off++){
+            it.setY(liquid.getY()+circle/2+1);
+            if(getBlockInt(it)==block.getData().number)
+              while(isLoaded(it)){
+                int b = getBlockInt(it);
+                if(b==BlockList.air.getData().number)
+                  setBlock(it, block);
+                else if(b!=block.getData().number)
+                  break;
+                it.selfTranslation(0,1);
+              }
+            it.selfTranslation(1,0);
+          }
+        }
+      }
+    }
+    //above ground
+    pos = start.clone();
+    for(int i=0;i<width;i++){
+      int off = start_offset + i;
+      int terrainHeight = maxTerrainHeight+terrain.get(off);
+      if(terrainHeight>water_level)
+        for(int j=water_level;j<water_level+100;j++){
+          pos.setY(j);
+          if(getBlockInt(pos)!=BlockList.air.getData().number)
+            break;
+          if(j==water_level || j==water_level+1)
+            setBlock(pos, getBiomeInt(pos)==3?BlockList.ice:BlockList.water);
+          else
+            setBlock(pos, BlockList.water);
+        }
+      pos.selfTranslation(1, 0);
+    }
+    //Ore
+    Structure[] ores = new Structure[]{new Structure("mapGeneration/ore0.txt"),new Structure("mapGeneration/ore1.txt")};
+    Block[] oreType = new Block[]{BlockList.coal,BlockList.iron,BlockList.elkium,BlockList.mithril,BlockList.adminium,BlockList.remadium,BlockList.yemalium,BlockList.bellium};
+    final int[] oreThreshold = new int[]{0,0,150,300,600,450,450,450};
+    final float[] oreSpawnRate = new float[]{.005f,.004f,.003f,.002f,.001f,.001f,.001f,.001f};
+    for(int o=oreType.length-1;o>=0;o--){
+      pos = start.clone();
+      for(int i=0;i<width;i++){
+        for(int j=0;j<height;j++){
+          if(pos.getY()>oreThreshold[o] && getRandomFloat(pos.getX(), pos.getY(), 100+o*3) < oreSpawnRate[o])
+            ores[(int)(getRandomFloat(pos.getX(), pos.getY(), 101+o*3)*ores.length)].addStructure(getMap(), pos, getChunkX(), getChunkY(), new Block[]{oreType[o]}, BlockList.stone,getRandomFloat(pos.getX()*pos.getY() + pos.y, 102+o*3));
+          pos.selfTranslation(0, 1);
+        }
+        pos.selfTranslation(1, 0);
+        pos.setY(start.getY());
+      }
+    }
+    
+    //Structures
+    {
+      Structure[] house = new Structure[]{new Structure("mapGeneration/house0.txt"), new Structure("mapGeneration/house1.txt")};
+      pos = start.clone();
+      int i = 0;
+      if(i!=0)
+        pos.selfTranslation(i, 0);
+      while(i<width){
+        float rand = getRandomFloat(pos.getX(), pos.getY(), 10);
+        if(rand<0.01){
+          int index = (int)(rand/0.005f);
+          int structure_width = house[index].width;
+          int maxHeight = Integer.MAX_VALUE;
+          for(int iOffset = 0;iOffset<structure_width;iOffset++){
+            int terrain_height = terrain.get(start_offset + i + iOffset);
+            maxHeight = Math.min(maxHeight, terrain_height);//min since getMap() is upside-down
+            pos.selfTranslation(1, 0);
+          }
+          for(int iOffset = 0;iOffset<structure_width;iOffset++){
+            pos.selfTranslation(-1, 0);
+            pos.setY(maxTerrainHeight + maxHeight + 1);
+            do{
+              setBlock(pos, BlockList.cobblestone);
+              if(getBackInt(pos)==BlockList.airBackground.getData().number)
+                setBackground(pos, BlockList.stoneBackground);
+              pos.selfTranslation(0, 1);
+            } while(getBlockInt(pos)==BlockList.air.getData().number && isLoaded(pos));
+          }
+          pos.setY(maxTerrainHeight + maxHeight + 1 - house[index].height);
+          house[index].addStructure(getMap(), pos, getChunkX(), getChunkY(), null, null, getRandomFloat(pos.getX(), pos.getY(), 11));
+          pos.selfTranslation(structure_width, 0);
+          i += structure_width;
+        }
+        pos.selfTranslation(1, 0);
+        i++;
+      }
+    }
+    
+    //Plants
+    Structure tree = new Structure("mapGeneration/tree0.txt");
+    pos = start.clone();
+    for(int i=0;i<width;i++){
+      int x_check = pos.x;
+      pos.setY(maxTerrainHeight+terrain.get(start_offset+i)-1);
+      while(getBlockInt(pos)==BlockList.air.getData().number && isLoaded(pos))
+        pos.selfTranslation(0, 1);
+      if(getBlockInt(pos)==BlockList.dirt.getData().number)
+        setBlock(pos, BlockList.grass);
+      if(getBlockInt(pos)==BlockList.grass.getData().number || getBlockInt(pos)==BlockList.snow.getData().number || getBlockInt(pos)==BlockList.sand.getData().number){
+        pos.selfTranslation(0, -1);
+        float rand = getRandomFloat(pos.getX(),pos.getY(),12);
+        if(rand < .1f){
+          Position tree_pos = pos.clone().selfTranslation(-tree.width/2, -tree.height+1);
+          tree.addStructure(getMap(), tree_pos, getChunkX(), getChunkY(), null, BlockList.air, getRandomFloat(pos.getX(), pos.getY(), 13));
+        }else if(rand < .11f){
+          setBlock(pos,BlockList.cottonPlant);
+        }else if(rand < .16f && getBiomeInt(pos)!=0){
+          setBlock(pos, BlockList.flowerRed);
+        }else if(rand < .21f && getBiomeInt(pos)!=0){
+          setBlock(pos, BlockList.flowerBlue);
+        }else if(rand < .5f && getBiomeInt(pos)!=0){
+          setBlock(pos,BlockList.tallGrass);
+        }else if(rand < .5f && getBiomeInt(pos)==0){
+          setBlock(pos,BlockList.cactus);
+          if(rand<.2f)
+            setBlock(pos.getTranslation(new Position(),0,-1),BlockList.cactus);
+        }
+      }
+      pos.selfTranslation(1, 0);
+      Services.singleton.sert(pos.x==(x_check+1)%getMap().gW);
+    }
+    
+    //Spawn player
+    if(getChunkX()==0 && getChunkY()==0){
+      pos = new Position(10, -10);
+      for(int i=-20;i<BlockMapModule.gH;i++){
+        if(getBlockInt(pos) != BlockList.air.getData().number){
+          pos.selfTranslation(0, -1);
+          Entity player = Adventure.tree.getChild("entities").addNew("player", "player.ob", new Point2F(pos.getX()+0.51f, pos.getY()-0.01f));
+          ((PlayerModule)player.getModule(PlayerModule.class)).gamemode = GuiLib.spawn_gamemode;
+          player.init();
+          break;
+        }
+        pos.selfTranslation(0, 1);
+      }
+      if(getMap().map_name.equals("Tutorial")){
+        GuiLib.currentInteraction = attatchToGround(10, "sign", "Welcome to the|tutorial!|Move using the lower|left d-pad.|Tap on other signs|to read them.");
+        GuiLib.interact_type = GuiLib.interactType.sign;
+        ((Sign)BlockList.sign.getData()).openSign(GuiLib.currentInteraction, getMap());
+        attatchToGround(12, "dirt", null);
+        attatchToGround(12, "dirt", null);
+        attatchToGround(12, "grass", null);
+        
+        attatchToGround(15, "sign", "Select the item you|want to use in the|hotbar on the left.|Then use the lower|right virtual joystick|to break blocks.");
+        attatchToGround(16, "dirt", null);
+        attatchToGround(16, "dirt", null);
+        attatchToGround(16, "dirt", null);
+        attatchToGround(16, "dirt", null);
+        attatchToGround(16, "grass", null);
+        
+        attatchToGround(19, "sign", "Tap the grid symbol|to open inventory|or craft items.|Standing next to|certain blocks|increases recipes.");
+        attatchToGround(20, "workbench", null);
+        
+        attatchToGround(22, "sign", "When placing blocks|release the joystick|at the chosen angle.|Tap on blocks to try|to interact with|them.");
+        InventoryModule inv = Chest.getDefaultInfo();
+        inv.pickupItem(ItemResources.getClone("door",1),0,1);
+        attatchToGround(23, "chest", inv);
+      }
+    }
+  }
+  private Position attatchToGround(int x, String block, Object extraData){
+    Position pos = new Position(x,0);
+    while(getBlockInt(pos) == BlockList.air.getData().number || getBlockInt(pos) != BlockList.grass.getData().number && getBlockInt(pos) != BlockList.dirt.getData().number)
+      pos.selfTranslation(0,1);
+    pos.selfTranslation(0,-1);
+    Block b = BlockList.getBlock(block);
+    setBlock(pos, b);
+    if(extraData!=null)
+      getMap().setExtraInfo(pos, b.getData().type, extraData);
+    return pos;
+  }
+  private int loadCounter = 0;
+  protected void importChunk(){
+    Log.d(TAG,"Chunk "+getChunkX()+" has begun importing");
+    initImportConverters();
+    int gW = 256, gH = 1024;
+    Services.singleton.sert(gW%BlockMapModule.gW==0 && gH%BlockMapModule.gH==0);
+    int rW = gW/BlockMapModule.gW, rH = gH/BlockMapModule.gH;
+    int chunkNum = (int)Math.floor((float)getChunkX()/rW);
+    try{
+      File f2 = new File(Input.singleton.getExternalStorageDirectory().getPath()+"/Terrablock/levels/"+getMap().map_name+"/m"+chunkNum+".tblock");
+      FileInputStream in = new FileInputStream(f2);
+      //FileInputStream in = this.getContext().openFileInput(gv.mg.getRootName()+"m"+chunkNum+".tblock");
+      
+      //int gridX = in.nextInt();
+      //int gridY = in.nextInt();
+      //System.out.println(gridX+", "+gridY);
+      LinkedList<Position> chests = new LinkedList<>();
+      LinkedList<Position> signs = new LinkedList<>();
+      
+      
+      
+      int[] biome_conversion = new int[]{0,0,1,1,2,2,1,2,1,1};
+      byte[] byteStorage1 = new byte[gW];
+      in.read(byteStorage1);
+      for(int i = 0;i<gW;i++){
+        byte biome = byteStorage1[i];
+        setBiomeInt(new Position(getChunkX(), getChunkY(), i%BlockMapModule.gW, 0), biome_conversion[biome]);
+      }
+      final int y_translation = -256;
+      byteStorage1 = new byte[gH];
+      for (int i = 0;i<gW;i++){
+        in.read(byteStorage1);
+        if((int)Math.floor((float)i/BlockMapModule.gW) == Nick.mod(getChunkX(),rW))
+          for (int j = 0;j<gH;j++){
+            if((int)Math.floor((float)(j+y_translation)/BlockMapModule.gH) == Nick.mod(getChunkY(),rH)){
+              int index=byteStorage1[j];
+              if(index<0)
+                index+=256;
+              Services.singleton.sert(new_value_block[index]!=null);
+              Position pos = new Position(getChunkX(), getChunkY(), i%BlockMapModule.gW, Nick.mod(j + y_translation,BlockMapModule.gH));
+              setBlock(pos, new_value_block[index]);
+              if(new_value_block[index].getData() instanceof Chest)
+                chests.add(pos);
+              else if(new_value_block[index].getData() instanceof Sign)
+                signs.add(pos);
+              if(new_value_update[index]!=null)
+                getMap().addUpdates(pos,UpdateSize.one,new_value_update[index],0);
+              if(new_value_data[index] != null)
+                setExtraInfo(pos, BlockType.foreground, new_value_data[index]);
+            }
+          }
+      }
+      for (int i = 0;i<gW;i++){
+        in.read(byteStorage1);//eat lighting
+      }
+      boolean old=false;
+      if(in.read()==0){
+        old = true;
+        byteStorage1[0]=0;
+        Log.d(TAG,"OLD LEVEL");
+      }//otherwise it should be a 1
+      for (int i = 0;i<gW;i++){
+        if(old&&i==0){
+          Log.d(TAG," "+in.read(byteStorage1,1,gH-1));
+        }else{
+          in.read(byteStorage1);
+        }
+        int[] power = new int[gH];
+        for (int j = 0;j<gH;j++){
+          power[j] = byteStorage1[j];
+          if(power[j]<0){
+            power[j]+=256;
+          }
+        }
+        if(!old){
+          in.read(byteStorage1);
+          for (int j = 0;j<gH;j++){
+            power[j] += (byteStorage1[j]<0?byteStorage1[j]+256:byteStorage1[j])*256;
+          }
+        }
+        //TODO convert power
+      }//Log.d(TAG,"Power Done");
+      int count = 0;
+      for (int i = 0;i<gW;i++){
+        in.read(byteStorage1);
+        int last_solid_j=-1;
+        if((int)Math.floor((float)i/BlockMapModule.gW) == Nick.mod(getChunkX(),rW))
+          for (int j = 0;j<gH;j++){
+            if((int)Math.floor((float)(j+y_translation)/BlockMapModule.gH) == Nick.mod(getChunkY(),rH)){
+              int index=byteStorage1[j];
+              if(index<0)
+                index+=256;
+              Position pos = new Position(getChunkX(), getChunkY(), i%BlockMapModule.gW, Nick.mod(j + y_translation,BlockMapModule.gH));
+              Services.singleton.sert(new_value_block[index].getData() instanceof Background || new_value_block[index].getData() instanceof Air);
+              setBackground(pos, new_value_block[index]);
+              count++;
+              if(index==0){
+                setLight(pos, 15);
+              }else{
+                if(last_solid_j!=j-1){
+                  getMap().addUpdates(pos, UpdateSize.one, BlockType.lighting, 0);
+                  if(last_solid_j!=-1){
+                    pos.y=(last_solid_j + y_translation)%BlockMapModule.gH;
+                    getMap().addUpdates(pos, UpdateSize.one, BlockType.lighting, 0);
+                  }
+                }
+                last_solid_j=j;
+              }
+            }
+          }
+      }
+      Services.singleton.sert(count == BlockMapModule.gW*BlockMapModule.gH);
+      //Log.d(TAG,"Background Done");
+      int t1=in.read();
+      int t2=in.read();
+      int length=((t1 + 256)%256)*256 + ((t2 + 256)%256);
+      //chests= new int[(t1)*256+(t2)][42];
+      byteStorage1=new byte[42];
+      for(int j=0;j<length && !chests.isEmpty();j++){
+        Position pos = chests.pop();
+        InventoryModule inv = new InventoryModule("inv");
+        inv.size = 42;
+        inv.init();
+        setExtraInfo(pos, BlockType.foreground, inv);
+        in.read(byteStorage1);
+        for(int i=0;i<byteStorage1.length;i++){
+          int item_num = (short)(byteStorage1[i] + 128);
+          Services.singleton.sert(new_value_item[item_num]!=null);
+          inv.invItem[i] = new_value_item[item_num];
+        }
+      }
+      int te=in.read();
+      if(te==96){
+        //Log.d(TAG,"okay");
+      }else if(te==95){
+        //Log.d(TAG,"okay");
+      }else{
+        Log.e(TAG, "Expecting byte 95 (or 96) but did not recieve it");
+      }
+      int type=in.read();
+      if(type==2){
+        t1=in.read();
+        t2=in.read();
+        length = ((t1 + 256)%256)*256 + ((t2 + 256)%256);
+        for(int i=0;i<length && !signs.isEmpty();i++){
+          String sign="";
+          int lengthOfString=124;
+          byteStorage1=new byte[lengthOfString];
+          in.read(byteStorage1);
+          for(int j=0;j<lengthOfString;j++){
+            sign+=(char)byteStorage1[j];
+          }
+          setExtraInfo(signs.pop(),BlockType.foreground,sign);
+        }
+        type=in.read();
+        //Log.w(TAG,"Loading signs");
+      }
+      if(type==1){
+        try{
+          byteStorage1 = new byte[7];
+          int x;int y;
+          //int counter=0;
+          do{
+            //counter++;
+            in.read(byteStorage1);
+            x = (byteStorage1[0]+128+(byteStorage1[1]+128)*256)/8 + chunkNum*gW;
+            y = (byteStorage1[2]+128+(byteStorage1[3]+128)*256)/8;
+            //Log.d("Ad","loading: "+x+" "+y+" ("+(byteStorage1[4])+")");
+            switch(byteStorage1[4]){
+              /*
+              case -1:
+                entities.add(new FallingBlock(x,y,byteStorage1[5]+128));
+                break;
+              case 0:
+                entities.add(new BlockEntity(x,y,byteStorage1[5]+128,byteStorage1[6]+128));
+                break;
+              case 1:
+                entities.add(new Zombie(x,y,byteStorage1[5]+128,byteStorage1[6]+128));
+                break;
+              case 2:
+                entities.add(new Skeleton(x,y,byteStorage1[5]+128,byteStorage1[6]+128));
+                break;
+              case 3:
+                entities.add(new Minecart(x,y));
+                break;
+              case 4:
+                entities.add(new Bird(x,y));
+                break;
+              case 6:
+                entities.add(new Penguin(x,y,byteStorage1[5]+128,byteStorage1[6]+128));
+                break;
+              case 7:
+                entities.add(new Fish(x,y,byteStorage1[5]+128,byteStorage1[6]+128));
+                break;
+              case 8:
+                entities.add(new Shark(x,y,byteStorage1[5]+128,byteStorage1[6]+128));
+                break;
+                */
+            }
+          }while(in.read()==1);
+        }catch(NoSuchElementException e){Log.w(TAG,"Error importing World or importing very old type of world");}
+      }
+      
+      if(te>95){//currently can only be 96
+        int l = in.read();
+        byteStorage1=new byte[7];
+        for(int i=0;i<l;i++){
+          in.read(byteStorage1);
+          getMap().addUpdates(new Position((byteStorage1[0]+128+(byteStorage1[1]+128)*256), (byteStorage1[2]+128+(byteStorage1[3]+128)*256)),
+              UpdateSize.one,BlockType.wiring, byteStorage1[5]+128);
+          //Log.d(TAG,"Loading.. "+(byteStorage1[0]+128+(byteStorage1[1]+128)*256)+"  "+(byteStorage1[2]+128+(byteStorage1[3]+128)*256)+"  "+
+          //		(byteStorage1[5]+128)+"  "+byteStorage1[4]);
+        }
+      }
+      
+      in.close();
+      Log.d(TAG,"Chunk "+getChunkX()+", "+getChunkY()+" has imported Sucessfully");
+      loadCounter = 0;
+    }catch(NoSuchElementException e){
+      Log.w(TAG,"Chunk "+getChunkX()+", "+getChunkY()+" has failed importing; Thus trying again");
+      loadCounter++;
+      if(loadCounter < 3){
+        importChunk();
+      }else{
+        Log.e(TAG, "Could not import chunk, exiting game");
+        createChunk();
+      }
+    }catch(IOException error){
+      createChunk();
+    }
+  }
+  public void importPlayer(String map_name){
+    //Log.d(TAG,"Player has begun loading");
+    initImportConverters();
+    float playerX,playerY;
+    int health;
+    //int difficulty;
+    boolean creativeMode;
+    Item[] items = new Item[21];
+    try{
+      File f2 = new File(Input.singleton.getExternalStorageDirectory(), "/Terrablock/levels/"+map_name+"/s.tblock");
+      FileInputStream in = new FileInputStream(f2);
+      //FileInputStream in = this.getContext().openFileInput(gv.mg.getRootName()+"s.txt");
+      byte[] byteStorage1 = new byte[14 + 2*21];//2 for each of 21 items plus 14 for player-pos/misc-info
+      in.read(byteStorage1);
+      playerX = (((byteStorage1[0]+128) + (byteStorage1[1]+128)*256 + (byteStorage1[2]+128)*65536 + (byteStorage1[3]+128)%128*8388608) * (byteStorage1[3]<0?-1:1))/8f;
+      playerY = ((byteStorage1[4]+128) + (byteStorage1[5]+128)*256 + (byteStorage1[6]+128)*65536 + (byteStorage1[7]+128)*16777216)/8f;
+      Time.totalTicks = (byteStorage1[9]+128) + (byteStorage1[10]+128)*256 + (byteStorage1[11]+128)*65536 + (byteStorage1[12]+128)*16777216;
+      //GameVariables.startingTime = GameVariables.totalGameTicks;
+      health = byteStorage1[13];
+      //GameVariables.currentChunk=byteStorage1[8];
+      for (int i=0;i<items.length;i++){
+        int index = (short)(byteStorage1[2*i+14]+128);
+        if(new_value_item[index]!=null){
+          items[i]=new_value_item[index].clone();
+          items[i].amount=(short)(byteStorage1[2*i + 15] + 128);
+        }
+      }
+      in.close();
+    }catch(IOException error){
+      Log.w(TAG,"Player has loaded Unsuccessfully; Thus creating player data... "+error.getMessage());
+      playerX = .5f;
+      playerY = 517;
+      health = 14;
+    }
+    try{
+      FileInputStream in = new FileInputStream(new File (Input.singleton.getExternalStorageDirectory(), "/Terrablock/levels/"+map_name+"/i.tblock"));
+      int temp2 = in.read()+128;
+      //difficulty = temp2%4;
+      creativeMode = (temp2/16)%2==1;
+      in.close();
+    }catch(IOException e){
+      //difficulty=2;
+      creativeMode = false;
+    }
+    Entity entity = Adventure.tree.getChild("entities").addNew("player", "player.ob", new Point2F(playerX, playerY));
+    PlayerModule player = ((PlayerModule)entity.getModule(PlayerModule.class));
+    player.init();
+    player.gamemode = creativeMode;
+    player.getLivingModule().health = Math.min(player.getLivingModule().getAttribute("max_health"),health);
+    InventoryModule inv = player.getInv();
+    for(Item i:items)
+      if(i!=null)
+        inv.pickupItem(i,0,inv.size);
+  }
+  String[] new_value = new String[]{
+      "air_background","stone",null,null,"dirt","grass","snow","sand",
+      "sandstone","brick","gravel",null,"obsidian","cobblestone","bedrock","wood",
+      "coal","iron","elkium","mithril","adminium","remadium","bellium","yemalium",
+      null,null,null,"piston wiring","piston wiring","piston wiring","piston wiring","piston wiring",
+      "piston wiring","piston wiring","piston wiring","air wiring","air wiring","air wiring","air wiring","powered_block wiring",
+      "door none 1","door none 0","leaves",null,null,"cactus","bomb",null,
+      null,null,"lamp wiring","lamp wiring","cloud","condensed_cloud","stone_brick","bomb_box",
+      "ice",null,"glass","cotton_block","cotton_block","cotton_block","cotton_block","cotton_block",
+      "cotton_block",null,"anvil","furnace","workbench","chest","stone_background","stone_background_red",
+      "stone_background_blue","dirt_background","grass_background","snow_background","sand_background","sandstone_background","wood_background","brick_background",
+      "stone_brick_background","cobblestone_background",null,"inverter wiring 0","inverter wiring 3","inverter wiring 1","inverter wiring 4","inverter wiring 6",
+      "inverter wiring 2","inverter wiring 5","remadium_wire","bellium_wire","yemalium_wire","transformer wiring 0","transformer wiring 3","transformer wiring 1",
+      "transformer wiring 4","transformer wiring 6","transformer wiring 2","transformer wiring 5","air","tall_grass","flower_red","flower_yellow",
+      "cotton_plant","sign","door wiring 3","door wiring 2","bed none 1","bed none 0","ladder","sapling_forest",
+      null,null,"wooden_log",null,null,"torch light","minecart","cotton",
+      "rail none 0","rail none 2","air","rail none 1","air","coal_chunk","iron_bar","elkium_bar",
+      "mithril_bar","adminium_bar","remadium_bar","bellium_bar","yemalium_bar","feather","raw_steak","cooked_steak",
+      "raw_fish","cooked_fish",null,null,null,null,null,null,
+      null,null,null,null,"pressure_pad","lever wiring 1","lever wiring 0","bucket",
+      "water","air block","air block","air block","air block","air block","air block","air block",
+      "air block","air block","air block","air block","air block","air block","air block","air block",
+      "air block",null,null,"lava block","air block","air block","air block","air block",
+      "air block","air block","air block","air block","air block","air block","air block","air block",
+      "air block","air block","air block","air block","fire",null,null,null,
+      null,null,null,null,null,null,null,null,
+      "stone_pickaxe","stone_hatchet","stone_sword","stone_saw","iron_pickaxe","iron_hatchet","iron_sword","iron_saw",
+      "elkium_pickaxe","elkium_hatchet","elkium_sword","elkium_saw","mithril_pickaxe","mithril_hatchet","mithril_sword","mithril_saw",
+      "adminium_pickaxe","adminium_hatchet","adminium_sword","adminium_saw","bow","arrow","iron_armor","elkium_armor",
+      "mithril_armor","adminium_armor","remadium_pants","bellium_helm","yemalium_armor","wire_cutters","screwdriver",null,
+      null,null,null,null,null,null,null,null,
+      null,null,null,null,null,null,null,null,
+      null,null,null,null,null,null,null,null,
+  };
+  Block[] new_value_block = new Block[new_value.length];
+  Item[] new_value_item = new Item[new_value.length];
+  BlockType[] new_value_update = new BlockType[new_value.length];
+  Object[] new_value_data = new Object[new_value.length];
+  public void initImportConverters(){
+    if(new_value_block[0]!=null)
+      return;
+    Services.singleton.sert(new_value.length==256);
+    HashSet<String> ignore = new HashSet<>();
+    {
+      String[] list=new String[]{"gravel", "obsidian", "piston", "pressure_pad", "feather", "raw_steak", "cooked_steak", "raw_fish", "cooked_fish", "fire"};
+      for(String thing:list)
+        ignore.add(thing);
+    }
+    for(int i=0;i<new_value.length;i++){
+      if(new_value[i] != null){
+        String[] split=new_value[i].split(" ");
+        if(ignore.contains(split[0]))
+          split[0]="air";
+        if(BlockList.isBlock(split[0]))
+          new_value_block[i]=BlockList.getBlock(split[0]);
+        new_value_item[i]=ItemResources.getClone(split[0]);
+        if(split.length>1){
+          switch(split[1]){
+            case "none":
+              break;
+            case "block":
+              new_value_update[i]=BlockType.foreground;
+              break;
+            case "light":
+              new_value_update[i]=BlockType.lighting;
+              break;
+            case "wiring":
+              new_value_update[i]=BlockType.wiring;
+              break;
+            default:
+              Log.e(TAG, "Extra update configuration from importing old maps is wrong: "+new_value[i]);
+          }
+          if(split.length>2){
+            new_value_data[i]=Integer.parseInt(split[2]);
+          }
+        }
+      }
+    }
+  }
+}
+
+#include <iostream>
+using namespace std;
+     
+void Store(){
+     
+     cout << "The Item store is not finished yet\n" << endl;
+     
+     int Mainmenu();
+     Mainmenu();
+     
+     }
+     
+void Character(){
+     
+     int PlayerHp, PlayerStr, PlayerMana;
+     
+     cout << "Your character has:\n\n";
+               
+     cout << PlayerHp << " Health" << endl;
+     cout << PlayerStr << " Strength" << endl;
+     cout << PlayerMana << " Mana" << endl;
+     
+     cout << endl;
+     
+     int Mainmenu();
+     Mainmenu();
+     }
+     
+void Inventory(){
+     
+     cout << "Your inventory contains:\n" << endl;
+     
+     int Mainmenu();
+     Mainmenu();
+
+     }
+     
+void Wilderness(){
+     
+     cout << "You search the Jungle and find:\n" << endl;
+     
+     string Creatures[10];
+     
+     Creatures[0] = "1";
+     Creatures[1] = "2";
+     Creatures[2] = "3";
+     Creatures[3] = "4";
+     
+     cout << Creatures << " Is really dangerous " << endl;
+     
+     int Mainmenu();
+     Mainmenu();
+     }
+
+void Mainmenu(){
+     
+     string choice;
+     
+     cout << "1: Attack creature" << endl;
+     cout << "2: Buy equipment" << endl;
+     cout << "3: Inventory" << endl;
+     cout << "4: Stats" << endl;
+          
+          // invalid option returns to this
+          InvalidOption:
+                      
+     cin >> choice;
+     if (choice == "1"){
+                Wilderness ();
+                }
+     else if (choice == "2"){
+                     Store();
+                     }
+     else if (choice == "3"){
+                     Inventory();
+                     }
+     else if (choice == "4"){
+                     Character();
+                     }
+     else{
+          cout << "You have not chosen a valid option" << endl;
+          goto InvalidOption;
+     }
+                     
+
+     
+     }
+
+int main()
+{
+    int PlayerHp = 100, PlayerStr = 20, PlayerMana = 50;
+    Mainmenu ();
+}
+Edit & Run
+// ConsoleApplication1.cpp : Defines the entry point for the console application.
+//
+
+#include "stdafx.h"
+#include <assert.h>
+#include <string>
+#include <iostream>
+#include <fstream>
+#include <ctime>
+#include <vector>
+
+using namespace std;
+
+static void populatePolygrams(char file[]);
+static void savePolygrams(char file[]);
+static void loadPolygrams(char file[]);
+static void logFrequencies(int n);
+static void initKeymapping();
+static float testKeymapping(const char data[], int display);
+static string generateDoubleGroup(string a, string b);
+static string generateQuadGroup(string a, string b, string c, string d);
+
+int total = 0;
+int g1[100] = { 0 };
+int g2[100][100] = { 0 };
+int g3[100][100][100] = { 0 };
+int g4[100][100][100][100] = { 0 };
+bool m2[100][100] = { false };//index is false if ab is undesired
+bool m3[100][100][100] = { false };//index is false if abc is undesired with respect to a and c
+bool m4[100][100][100][100] = { false };//index is false if abcd is undesired with respect to a and d
+
+int main()
+{
+  populatePolygrams("in.txt");
+  savePolygrams("data.txt");
+  loadPolygrams("data.txt");
+  logFrequencies(1);
+  initKeymapping();
+  string keys = generateDoubleGroup("`1qaz", "~!QAZ") + "\t\t~`qQ\1`\t\1~\t\1q\t\1Q\t\1" + '\1';
+  keys += generateDoubleGroup("2wsx", "@WSX") + '\1';
+  keys += generateDoubleGroup("3edc", "#EDC") + '\1';
+  keys += generateQuadGroup("4rfv", "$RFV", "5tgb", "%TGB") + '\1';
+  keys += "  \1\1";
+  keys += generateQuadGroup("6yhn", "^YHN", "7ujm", "&UJM") + '\1';
+  keys += generateDoubleGroup("8ik,", "*IK<") + '\1';
+  keys += generateDoubleGroup("9ol.", "(OL>") + '\1';
+  keys += generateDoubleGroup("0p;/", ")P:?") + "0-\1)_\1p[\1P{\1;'\1:\"\1--0[=\1__){+\1[[-p']\1{{_P\"}\1''[;\1\"\"{:\1==-]\1++_}\1]]=[\\\1}}+{|\1\\\\]\1||}\1" + '\1';
+  testKeymapping(keys.c_str(), 1);
+
+  string keys2 = "";
+
+  float wait;
+  std::cin >> wait;
+}
+static char getIndex(char c) {
+	if (c == 9 || c == 10)
+		return c - 8;
+	else if (c >= 32)
+		return c - 29;
+	else
+		return -1;
+}
+static char getChar(char i) {
+  if (i == 1 || i == 2)
+    return i + 8;
+  else if (i >= 3)
+    return i + 29;
+  else
+    return -1;
+}
+static void populatePolygrams(char file[]){
+	std::ifstream is(file);
+	char c;
+	char history[] = {0,0,0};
+	int len_m1 = sizeof(history)/sizeof(*history)-1;
+	const long double startTime = time(0);
+	while (is.get(c)) {
+		if (c == 0)
+			break;
+		char index = getIndex(c);
+		g1[index]++;
+		g2[index][history[len_m1]]++;
+		g3[index][history[len_m1]][history[len_m1-1]]++;
+		g4[index][history[len_m1]][history[len_m1-1]][history[len_m1-2]]++;
+		for (int i = 0; i < len_m1; i++)
+			history[i] = history[i+1];
+		history[len_m1] = index;
+		total++;
+	}
+	is.close();
+}
+static void savePolygrams(char file[]) {
+	
+}
+static void loadPolygrams(char file[]) {
+  std::ifstream is(file);
+  char c;
+  while (is.get(c)) {
+  }
+  is.close();
+}
+static void logFrequencies(int n) {
+  if (n > 0){
+    for (int i = 0; i < 100; i++) {
+      std::cout << getChar(i) << '=' << g1[i] << std::endl;
+      if (n > 1) {
+        for (int j = 0; j < 100; j++) {
+          std::cout << getChar(i) << getChar(j) << '=' << g2[i][j] << ' ';
+        }
+        std::cout << std::endl;
+      }
+    }
+  }
+}
+
+static string generateGroup(vector<string> s) {
+  string ans = "";
+  for (int i = 0; i < s[0].length(); i++) {
+    string base = "";
+    for (int st = 0; st < s.size(); st++)
+      base += s[st][i];
+    for (int st = 0; st < s.size(); st++) {
+      ans += s[st][i] + base;
+      if (i > 0)
+        ans += s[st][i - 1];
+      if (i < s[st].length() - 1)
+        ans += s[st][i + 1];
+      ans += '\1';
+    }
+  }
+  return ans;
+}
+static string generateDoubleGroup(string a, string b) {
+  assert(a.length() == b.length());
+  vector<string> s {a,b};
+  return generateGroup(s);
+}
+static string generateQuadGroup(string a, string b, string c, string d) {
+  assert(a.length() == b.length() && b.length() == c.length() && c.length() == d.length());
+  vector<string> s{ a,b,c,d };
+  return generateGroup(s);
+}
+
+static void initKeymapping() {
+  for (int i = 0; i < 100; i++) {//init all indices to true
+    for (int j = 0; j < 100; j++) {
+      m2[i][j] = true;
+      for (int k = 0; k < 100; k++) {
+        m3[i][j][k] = true;
+        for (int l = 0; l < 100; l++) {
+          m4[i][j][k][l] = true;
+        }
+      }
+    }
+  }
+}
+static float testKeymapping(const char data[], int display) {
+  //Generate data in mapping
+  bool mapping[100][100] = { false };
+  int num_hands = 1;
+  int hand[100] = { 0 };
+  {
+    bool hand_exists[100] = { false };
+    bool exists[100] = { false };
+    char current_index = -1;
+    int i = 0;
+    while (data[i] != '\0') {
+      if (data[i] == '\1') {
+        if (-1 == current_index) {
+          for (int j = 0; j < 100; j++)
+            hand_exists[j] |= exists[j];
+          num_hands++;
+        }
+        else {
+          current_index = -1;
+        }
+      }
+      else {
+        char index = getIndex(data[i]);
+        if (-1 == current_index) {
+          current_index = index;
+          hand[current_index] = num_hands;
+          for (int j = 0; j < 100; j++) {
+            if (hand_exists[j]) {
+              mapping[current_index][j] = true;
+              mapping[j][current_index] = true;
+            }
+          }
+          exists[index] = true;
+        }
+        else {
+          mapping[current_index][index] = true;
+        }
+      }
+      i++;
+    }
+  }
+
+  //Toggle values in m2,m3,m4 that rely on any information that have been changed
+  for (int i = 0; i < 100; i++) {
+    for (int j = 0; j < 100; j++) {
+      if (m2[i][j] == mapping[i][j])
+        continue;
+      if (hand[i] != hand[j] || hand[i] == 0)
+        continue;
+      //assert(hand[i] == hand[j]);
+      bool change = mapping[i][j];
+      m2[i][j] = change;
+      int h = hand[i];
+      for (int k = 0; k < 100; k++) {
+        if (hand[k] != h || m2[i][k] && m2[k][j])
+          m3[i][k][j] = change;
+        for (int l = 0; l < 100; l++) {
+          if (hand[k] != h) {
+            if (hand[l] != h || m2[i][l] && m2[l][j])
+              m4[i][k][l][j] = change;
+          }
+          else {
+            if (hand[l] != h && m2[i][k] && m2[k][j] || m2[i][k] && m2[k][l] && m2[l][j])
+              m4[i][k][l][j] = change;
+          }
+        }
+      }
+    }
+  }
+
+  //Generate score (lower is better since it represents the number of required breaks)
+  int score2 = 0, score3 = 0, score4 = 0;
+  for (int i = 0; i < 100; i++) {
+    for (int j = 0; j < 100; j++) {
+      if (!m2[i][j]) {
+        if(display==2 && g2[i][j]>0)
+          std::cout << getChar(i) << getChar(j) << ' ' << g2[i][j] << std::endl;
+        score2 += g2[i][j];
+      }
+      for (int k = 0; k < 100; k++) {
+        if (!m3[i][j][k]) {
+          if (display==2 && g3[i][j][k]>0)
+            std::cout << getChar(i) << getChar(j) << getChar(k) << ' ' << g3[i][j][k] << std::endl;
+          score3 += g3[i][j][k];
+        }
+        for (int l = 0; l < 100; l++) {
+          if (!m4[i][j][k][l]) {
+            if (display==2 && g4[i][j][k][l]>0)
+              std::cout << getChar(i) << getChar(j) << getChar(k) << getChar(l) << ' ' << g4[i][j][k][l] << std::endl;
+            score4 += g4[i][j][k][l];
+          }
+        }
+      }
+    }
+  }
+  int score = score2 + score3 + score4;
+  if (display)
+    std::cout << "Score = " << score << '(' << score2 << '+' << score3 << '+' << score4 << ")/" << total << std::endl;
+  return score;
+}
+package com.driftingsofa.nickgkg.modules;
+
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Formatter;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.Locale;
+import java.util.Queue;
+import java.util.Random;
+import java.util.Scanner;
+
+import com.driftingsofa.nickgkg.engine.*;
+import com.driftingsofa.nickgkg.terrablock.*;
+import com.driftingsofa.nickgkg.terrablock.Type.UpdateSize;
+import com.driftingsofa.nickgkg.terrablock.blocks.Block;
+import com.driftingsofa.nickgkg.terrablock.blocks.BlockList;
+import com.driftingsofa.nickgkg.terrablock.items.Item;
+import com.driftingsofa.nickgkg.terrablock.items.MeleeTool;
+
+public class BlockMapModule extends Physics2DModule{
+  public BlockMapModule(String name) {
+    super(name);
+  }
+  private Object readResolve(){
+    return readResolveBackup();
+  }
+  protected Object readResolveBackup(){
+    return super.readResolveBackup();
+  }
+  private final String TAG = "BlockMapModule";
+  
+  public static final int cW = 3;//must be odd #
+  public static final int cH = 3;//must be odd #
+  public static final int gW = 128;
+  public static final int gH = 128;
+  
+
+  public long seed;
+  public MapGenerator mg;
+  
+  public String map_name;
+  public int currentChunkX = 0;
+  public int currentChunkY = 0;
+  public int entNum = 0;
+
+  public int difficulty;
+  public boolean imported = false;
+  public boolean precipitation = false;
+
+  private boolean ready = false;
+  
+  int[][] biome = new int[cW][gW];
+  int[][][][] grid = new int[cW][cH][gW][gH];
+  int[][][][] light = new int[cW][cH][gW][gH];
+  int[][][][] power = new int[cW][cH][gW][gH];
+  int[][][][] back = new int[cW][cH][gW][gH];
+  HashMap<LayerPosition,Object> stateInfo = new HashMap<LayerPosition,Object>();
+  Queue<LayerPosition> lightUpdatesQ = new LinkedList<LayerPosition>();
+  HashSet<LayerPosition> lightUpdates = new HashSet<LayerPosition>();//should get executed when free time is available
+  HashSet<LayerPosition>[] currentRequiredUpdates = new HashSet[10];//must get executed on a certain tick (near future)
+  {
+    for(int i=0;i<currentRequiredUpdates.length;i++)
+      currentRequiredUpdates[i] = new HashSet<LayerPosition>();
+  }
+  LinkedList<FutureUpdate> futureRequiredUpdates = new LinkedList<FutureUpdate>();//must get executed on a certain tick (far future)
+  @Override
+  public void init(){
+    Physics.physicsGlobal.add(this);
+    initLastPosition();
+    this.collider = null;
+    this.loadMap();
+    Adventure.updateEntityInstructions();
+    ready = true;
+    this.saveMap(false);
+  }
+  @Override
+  public void update(){
+    Profiler.start("block_physics");
+    if(Time.timeOfDay()==0f){
+      generateDailyEvents();
+    }
+    if(Time.totalTicks%Time.dayL==Time.dayL-1)
+      saveMap(false);
+    updateBlocks();
+    recurringUpdate();
+    updatePosition();
+    Profiler.end("block_physics");
+  }
+  public void updatePosition(){
+    Position p = new Position(Camera.getPos());
+    if(currentChunkX != p.chunkX || currentChunkY != p.chunkY)
+      if(Math.abs((currentChunkX+.5f)*gW - p.getX())>gW*3/4 || Math.abs((currentChunkY+.5f)*gH - p.getY())>gH*3/4)
+        moveToChunk(p.chunkX, p.chunkY);
+  }
+  public void recurringUpdate(){
+    int xDist = 64, yDist = 64;
+    int startX = (int)(Time.totalTicks*xDist%(gW*cW));
+    int startY = (int)(Time.totalTicks/(gW*cW/xDist)*yDist%(gH*cH));
+    Position pos = new Position((currentChunkX-cW/2)*gW + startX,(currentChunkY-cH/2)*gH + startY);
+    for(int i=0;i<xDist;i++){
+      for(int j=0;j<yDist;j++){
+        getBlock(pos).getData().recurringUpdate(pos, this);
+        pos.selfTranslation(0, 1);
+      } 
+      pos.selfTranslation(1, -yDist);
+    }
+  }
+  public void generateDailyEvents(){
+    precipitation = precipitation ? false : Math.random()<0.2f;
+  }
+  @Override
+  protected final boolean findUsableVelocity(MovementData move, Physics2DModule otherPhysics){
+    MovementData[] possibleMovement = new MovementData[otherPhysics.collider.hitboxPoints.length];
+    Block[] collisionBlock = new Block[otherPhysics.collider.hitboxPoints.length];
+    for(int i=0;i<otherPhysics.collider.hitboxPoints.length;i++){
+      Point2F point = otherPhysics.collider.hitboxPoints[i];
+      Point2F start = new Point2F(move.start.x + point.x, move.start.y + point.y);
+      Point2F end = new Point2F(start.x + move.movement.x, start.y + move.movement.y);
+      float slope = move.movement.y/move.movement.x;
+      float yIntercept = start.y - slope * start.x;
+      boolean hitSomething = false;
+      int xStep = end.x >= start.x?1:-1;
+      int yStep = end.y >= start.y?1:-1;
+      int y = (int)Math.floor(start.y);
+      int count = 0;
+      int x = (int)Math.floor(start.x) - xStep;
+      do{
+        x+=xStep;
+        int tempEndY = (int)Math.floor(slope*(x+(xStep+1)/2)+yIntercept);
+        y-=yStep;
+        do{
+          y+=yStep;
+          count++;
+          MovementData moveWithinBlock = move.clone();
+          moveWithinBlock.start = new Point2F(start.x - x,start.y - y);
+          Position p = new Position(x,y);
+          Block b;
+          if(!isLoaded(p)){
+            //e.pending_destroy = true;
+            //TODO still could be issue if entity can travel through blocks (like a ghost)
+            b = BlockList.bedrock;
+          }else{
+            b = getBlock(p);
+          }
+          Float collision = b.getData().attemptToMove(moveWithinBlock, otherPhysics, p, this);
+          if(collision != null){
+            hitSomething = true;
+            moveWithinBlock.start.x += x - point.x;
+            moveWithinBlock.start.y += y - point.y;
+            possibleMovement[i] = moveWithinBlock;
+            collisionBlock[i] = b;
+            otherPhysics.setHadCollision(true);
+            otherPhysics.onGround = (Math.abs(collision)<maximumSlope && moveWithinBlock.movement.y<0f) || otherPhysics.onGround;
+          }
+          //Debug.add("block #"+count,"pos = "+x+", "+y);
+        }while(y!=tempEndY&&y!=(int)Math.floor(end.y) && !hitSomething);
+      }while(x!=(int)Math.floor(end.x) && !hitSomething);
+      //Debug.add("findUsableVelocity block count",""+count);
+    }
+    int minDistanceIndex = -1;
+    float minDistanceSquared=Float.MAX_VALUE;
+    for(int i=0;i<possibleMovement.length;i++){
+      if(possibleMovement[i] != null){
+        float distanceSquared = (float)(Math.pow(move.start.x-possibleMovement[i].start.x, 2) + Math.pow(move.start.y-possibleMovement[i].start.y, 2));
+        if(distanceSquared < minDistanceSquared){
+          minDistanceSquared = distanceSquared;
+          minDistanceIndex = i;
+        }
+      }
+    }
+    if(minDistanceIndex == -1){//no collisions (manually change move)
+      move.start.x += move.movement.x;
+      move.start.y += move.movement.y;
+      //move.movement.x = 0;//irrelevant to future
+      //move.movement.y = 0;
+      return false;
+    }
+    collisionBlock[minDistanceIndex].getData().hitHitbox(otherPhysics, new Point2F(possibleMovement[minDistanceIndex].start.x,possibleMovement[minDistanceIndex].start.y), this);
+    move.start = possibleMovement[minDistanceIndex].start;
+    move.movement = possibleMovement[minDistanceIndex].movement;
+    move.velocity = possibleMovement[minDistanceIndex].velocity;
+    return true;
+  }
+  Position start;
+  int render_width, render_height;
+  float scale;
+  
+  @Override
+  public void pre_draw(){
+    super.pre_draw();
+    scale = Draw.zoom;
+    render_width = (int)(Draw.width/Draw.zoom);
+    render_height = (int)(Draw.height/Draw.zoom);
+  }
+  boolean can_draw = true;
+  @Override
+  public void draw(){
+    if(!ready)
+      return;
+    Sync.setNeedA(false);
+    Profiler.start("draw_background");
+    Point2F screenPos = new Point2F();
+    
+    //Set start position
+    start = new Position(currentChunkX+cW/2,currentChunkY-cH/2, gW-1, 0);
+    while(true){
+      Camera.getScreenPos(screenPos, start.chunkX*gW + start.x,start.chunkY*gH + start.y);
+      if(screenPos.x < Draw.width+scale){
+        start.selfTranslation(1, 0);
+        break;
+      }
+      start.selfTranslation(-1, 0);
+    }
+    while(true){
+      Camera.getScreenPos(screenPos, start.chunkX*gW + start.x,start.chunkY*gH + start.y);
+      if(screenPos.y >= -scale*5/2){
+        start.selfTranslation(0, -1);
+        break;
+      }
+      start.selfTranslation(0, 1);
+    }
+    can_draw = isLoaded(start.getTranslation(new Position(),2,-2)) && isLoaded(start.getTranslation(new Position(),-2-(int)(Draw.width/scale),2+(int)(Draw.height/scale)));
+
+    //Background
+    if(can_draw){
+      Position it=start.clone();
+      Position above=new Position();
+      Position below=new Position();
+      Position left=new Position();
+      Position right=new Position();
+      while(true){
+        while(true){
+          Camera.getScreenPos(screenPos, it.getX(), it.getY());
+          if(screenPos.x<-scale*5/2 || screenPos.y>=Draw.height+scale)
+            break;
+
+          screenPos.x+=scale/8;
+          screenPos.y+=-3*scale/8;
+          it.getTranslation(above, 0, -1);
+          it.getTranslation(below, 0, 1);
+          it.getTranslation(left, -1, 0);
+          it.getTranslation(right, 1, 0);
+          if(getBlock(it).getData().hasTransparency || getBackground(above).getData().hasTransparency
+              || getBackground(below).getData().hasTransparency || getBackground(left).getData().hasTransparency || getBackground(right).getData().hasTransparency){
+            Block b=getBackground(it);
+            b.getData().draw(it,this);
+            //getBackground(it).draw(screenPos.x, screenPos.y, it, this);
+          }
+
+          it.selfTranslation(0, 1);
+        }
+        if(screenPos.x<-scale*5/2)
+          break;
+        it.selfTranslation(-1, 0);
+        it.setY(start.getY());
+      }
+    }
+    Profiler.end("draw_background");
+    while(Sync.setNeedA(true));
+  }
+  public void drawForeground(){
+    if(!ready || !can_draw)
+      return;
+    Sync.setNeedA(false);
+    Profiler.start("draw_foreground");
+    //Foreground Blocks
+    _drawForeground();
+    if (precipitation)
+      drawPrecipitation();
+    drawPower();
+    drawLighting();
+    InventoryModule player_inv = GuiLib.player.getInv();
+    if(player_inv.getToPlacePos()!=null){
+      Point2F pos = player_inv.getToPlacePos().toPoint2F();
+      Draw.drawImage(pos.x, pos.y, 1, 1, true, 20.01f, new Texture("place"), null, Draw.Layer.solid);
+    }
+    if(player_inv.invItem==null)
+      return;
+    Item i = player_inv.getItem(player_inv.getHotbarIndex());
+    if(i instanceof MeleeTool){
+      MeleeTool m = (MeleeTool)i;
+      if(m.toolProgress>0f){
+        Point2F pos = m.toolPos.toPoint2F();
+        Draw.drawImage(pos.x, pos.y, 1, 1, true, 20.01f, new Texture("break"+((int)(m.toolProgress*10))), null, Draw.Layer.transparent_blocks);
+      }
+    }
+    Profiler.end("draw_foreground");
+    while(Sync.setNeedA(true));
+  }
+  private void _drawForeground(){
+    Point2F screenPos = new Point2F(0,0);
+    Position it = start.clone();//don't need to update start since it should have been updated earlier in this frame in the normal draw function
+    while(true){
+      while(true){
+        Camera.getScreenPos(screenPos, it.getX(),it.getY());
+        if(screenPos.x < -scale*5/2 || screenPos.y >= Draw.height+scale)
+          break;
+        screenPos.x += - scale/8;
+        screenPos.y +=  - scale / 8;
+        Block b = getBlock(it);
+        b.getData().draw(it, this);
+        //getBlock(it).draw(screenPos.x, screenPos.y, it, this);
+        it.selfTranslation(0, 1);
+      }
+      if(screenPos.x < -scale*3/2)
+        break;
+      it.selfTranslation(-1, 0);
+      it.setY(start.getY());
+    }
+  }
+  private void drawPrecipitation(){
+    Point2F screenPos = new Point2F(0,0);
+    Texture rain = new Texture("rainfall"+((int)(Time.totalTicks/2%4)));
+    Texture snow = new Texture("snowfall"+((int)(Time.totalTicks/2%8)));
+    //Precipitation
+    Position it = start.clone();
+    while(true){
+      boolean hasPrecip=false;
+      Position up=it.clone();
+      int biome=getBiome(it);
+      if(biome!=0){
+        for(int j=0;j<100;j++){
+          up.selfTranslation(0, -1);
+          if(!isLoaded(up))
+            break;
+          Block b=getBlock(up);
+          if(!b.getData().hasTransparency || b.getData()==BlockList.glass.getData()){
+            break;
+          }else if(getBackground(up).getData()==BlockList.airBackground.getData()){
+            hasPrecip=true;
+            break;
+          }
+        }
+        while(true){
+          Camera.getScreenPos(screenPos, it.getX(), it.getY());
+          if(screenPos.x<-scale*5/2 || screenPos.y>=Draw.height+scale || !isLoaded(it))
+            break;
+          hasPrecip=(hasPrecip || getBackground(it).getData()==BlockList.airBackground.getData()) && getBlock(it).getData()==BlockList.air.getData();
+          if(hasPrecip){
+            Draw.drawImage(it.getX(), it.getY(), 1, 1, true, 19f, biome==1?rain:snow, null, Draw.Layer.transparent_blocks);
+          }
+
+          it.selfTranslation(0, 1);
+        }
+      }
+      Camera.getScreenPos(screenPos, it.getX(), it.getY());
+      if(screenPos.x < -scale*5/2)
+        break;
+      it.selfTranslation(-1, 0);
+      it.setY(start.getY());
+    }
+  }
+  private void drawPower(){
+    Point2F screenPos = new Point2F(0,0);
+    float[][] locations = new float[][]{{.5f,.5f},{.625f,.625f},{.375f,.375f}};
+    Paint[][] colors = new Paint[][]{{CustomColors.redWireOff,CustomColors.redWireOn},
+        {CustomColors.yellowWireOff,CustomColors.yellowWireOn},{CustomColors.blueWireOff,CustomColors.blueWireOn}};
+    Position it = start.clone();
+
+    while(true){
+      while(true){
+        Camera.getScreenPos(screenPos, it.getX(),it.getY());
+        if(screenPos.x < -scale*5/2 || screenPos.y >= Draw.height+scale)
+          break;
+        screenPos.x += - scale/8;
+        screenPos.y += scale / 8;
+
+        int power = getPower(it);
+        if(power != 0){
+          int above = getPower(it.getTranslation(new Position(), 0, -1));
+          int below = getPower(it.getTranslation(new Position(), 0, 1));
+          int right = getPower(it.getTranslation(new Position(), 1, 0));
+          int left = getPower(it.getTranslation(new Position(), -1, 0));
+          for(int i=0;i<3;i++){
+            int div = (int)Math.pow(16, i);
+            if(power/div%16==0)
+              continue;
+            boolean none = above/div%16==0 && below/div%16==0 && right/div%16==0 && left/div%16==0;
+            if(none || left/div%16!=0 || right/div%16!=0)
+              Draw.drawLine(it.getX()+(none||left/div%16!=0?0f:locations[i][0]), it.getY()+locations[i][1],
+                  it.getX()+(none||right/div%16!=0?1:locations[i][0]), it.getY()+locations[i][1],
+                  power/div%16==1?colors[i][0]:colors[i][1], 0.125f, 20.002f, Draw.Layer.solid);
+            if(none || above/div%16!=0 || below/div%16!=0)
+              Draw.drawLine(it.getX()+locations[i][0], it.getY()+(none||above/div%16!=0?0f:locations[i][1]),
+                  it.getX()+locations[i][0], it.getY()+(none||below/div%16!=0?1:locations[i][1]),
+                  power/div%16==1?colors[i][0]:colors[i][1], 0.125f, 20.002f, Draw.Layer.solid);
+          }
+        }
+
+        it.selfTranslation(0, 1);
+      }
+      if(screenPos.x < -scale*5/2)
+        break;
+      it.selfTranslation(-1, 0);
+      it.setY(start.getY());
+    }
+  }
+  private void drawLighting(){
+    Profiler.start("drawLighting");
+    int naturalLightOffset,naturalLightR,naturalLightG,naturalLightB;
+    if (Time.timeOfDay() < .5f) {
+      naturalLightOffset = 0;
+      naturalLightR = 10;
+      naturalLightG = 10;
+      naturalLightB = 4;
+    } else if (Time.timeOfDay() < .6f) {
+      naturalLightOffset = 0 + (int)((Time.timeOfDay() - .5f) * 80);
+      naturalLightR = 10 - (int)((Time.timeOfDay() - .5f) * 70);
+      naturalLightG = 10 - (int)((Time.timeOfDay() - .5f) * 70);
+      naturalLightB = 4 + (int)((Time.timeOfDay() - .5f) * 20);
+    } else if (Time.timeOfDay() < .9f) {
+      naturalLightOffset = 8;
+      naturalLightR = 3;
+      naturalLightG = 3;
+      naturalLightB = 6;
+    } else {
+      naturalLightOffset = 8 - (int)((Time.timeOfDay() - .9f) * 80);
+      naturalLightR = 3 + (int)((Time.timeOfDay() - .9f) * 70);
+      naturalLightG = 3 + (int)((Time.timeOfDay() - .9f) * 70);
+      naturalLightB = 6 - (int)((Time.timeOfDay() - .9f) * 70);
+    }
+    Point2F screenPos = new Point2F(0,0);
+    Position temp = new Position();
+    Position it = start.clone();
+    float[] data = new float[9*6];
+    while(true){
+      while(true){
+        Camera.getScreenPos(screenPos, it.getX(),it.getY());
+        float x = it.getX()+.5f, y = it.getY()+.5f;
+        if(screenPos.x < -scale*5/2|| screenPos.y >= Draw.height+scale)
+          break;
+        data[0] = x;
+        data[1] = y;
+        data[3] = 1f;
+        data[4] = 1f;
+
+        data[9] = data[0] + 1f;
+        data[10] = data[1];
+        data[12] = 1f;
+        data[13] = data[4];
+
+        data[18] = data[9];
+        data[19] = data[1] + 1f;
+        data[21] = data[12];
+        data[22] = 1f;
+
+        data[27] = data[0];
+        data[28] = data[19];
+        data[30] = data[3];
+        data[31] = data[22];
+        int num_transparent = 0;
+        for(int vert=0;vert<4;vert++){
+          data[vert*9+2] = 20.005f;//depth
+          int light = 0;
+          switch(vert){
+            case 0:light = getLight(it);break;
+            case 1:light = getLight(it.getTranslation(temp, 1, 0));break;
+            case 2:light = getLight(it.getTranslation(temp, 1, 1));break;
+            case 3:light = getLight(it.getTranslation(temp, 0, 1));break;
+          }
+          int natLight = Math.max(0,light%16-naturalLightOffset);
+          int synLight = light/16%16;
+          if(natLight + synLight == 0){
+            data[vert*9+5] = 0f;
+            data[vert*9+6] = 0f;
+            data[vert*9+7] = 0f;
+            data[vert*9+8] = 1f;
+          }else{
+            float percentNat = (float)natLight/(natLight+synLight);
+            int natLightR = Math.max(0, naturalLightR - 15 + natLight);
+            int natLightG = Math.max(0, naturalLightG - 15 + natLight);
+            int natLightB = Math.max(0, naturalLightB - 15 + natLight);
+            data[vert*9+5] = (percentNat*natLightR+(1-percentNat)*(light/256%16))/15f;
+            data[vert*9+6] = (percentNat*natLightG+(1-percentNat)*(light/4096%16))/15f;
+            data[vert*9+7] = (percentNat*natLightB+(1-percentNat)*(light/65536%16))/15f;
+            float alpha = (15 - Math.max(natLight, synLight))/15f;
+            data[vert*9+8] = alpha;
+            if(alpha==0)
+              num_transparent++;
+          }
+        }
+        for(int i=0;i<9;i++){
+          data[4*9+i]=data[i];
+          data[5*9+i]=data[2*9+i];
+        }
+        if(num_transparent!=4){
+          Draw.fbs[Draw.Layer.lighting.ordinal()].put(data);
+        }
+        it.selfTranslation(0, 1);
+      }
+      if(screenPos.x < -scale*5/2)
+        break;
+      it.selfTranslation(-1, 0);
+      it.setY(start.getY());
+    }
+    Profiler.end("drawLighting");
+  }
+
+  @Override
+  public void destroy(boolean saved){
+    if(Adventure.focus.containsKey(this))
+      focusLost();
+    Physics.physicsGlobal.remove(this);
+    if(GuiLib.gameStarted)
+      this.saveMap(true);
+  }
+  
+  @Override
+  public boolean click(Input.PositionInput pos) {
+    if(pos.state || GuiLib.player==null)
+      return false;
+    Point2F world_pos = Camera.getWorldPos(new Point2F(), pos.point.x, pos.point.y);
+    Position position = new Position(world_pos);
+    if(isLoaded(position))
+      return getBlock(position).getData().click(GuiLib.player.getLivingModule(), pos.button==0, position, this);
+    return false;
+  }
+
+  
+  
+  public Block getBlock(Position p){
+    return localGetBlock(p.chunkX-currentChunkX+cW/2,p.chunkY-currentChunkY+cH/2,p.x,p.y);
+  }
+  public void setBlock(Position p, Block block){
+    localSetBlock(p.chunkX-currentChunkX+cW/2,p.chunkY-currentChunkY+cH/2,p.x,p.y,block);
+  }
+  public Block getBackground(Position p){
+    return localGetBackground(p.chunkX-currentChunkX+cW/2,p.chunkY-currentChunkY+cH/2,p.x,p.y);
+  }
+  public void setBackground(Position p, Block block){
+    localSetBackground(p.chunkX-currentChunkX+cW/2,p.chunkY-currentChunkY+cH/2,p.x,p.y,block);
+  }
+  public int getPower(Position p){
+    return localGetPower(p.chunkX-currentChunkX+cW/2,p.chunkY-currentChunkY+cH/2,p.x,p.y);
+  }
+  public void setPower(Position p, int block){
+    localSetPower(p.chunkX-currentChunkX+cW/2,p.chunkY-currentChunkY+cH/2,p.x,p.y,block);
+  }
+  public int getLight(Position p){
+    return localGetLight(p.chunkX-currentChunkX+cW/2,p.chunkY-currentChunkY+cH/2,p.x,p.y);
+  }
+  public void setLight(Position p, int value){
+    localSetLight(p.chunkX-currentChunkX+cW/2,p.chunkY-currentChunkY+cH/2,p.x,p.y,value);
+  }
+  public int getBiome(Position p){
+    return localGetBiome(p.chunkX-currentChunkX+cW/2,p.chunkY-currentChunkY+cH/2,p.x,p.y);
+  }
+  public void setExtraInfo(Position pos, Type.BlockType type, Object data){
+    setExtraInfo(new LayerPosition(pos, type), data);
+  }
+  public void setExtraInfo(LayerPosition pos, Object data){
+    localSetExtraInfo(pos, data);
+  }
+  public Object getExtraInfo(Position pos, Type.BlockType type){
+    return getExtraInfo(new LayerPosition(pos, type));
+  }
+  public Object getExtraInfo(LayerPosition pos){
+    return localGetExtraInfo(pos);
+  }
+  public void removeExtraInfo(Position pos, Type.BlockType type){
+    removeExtraInfo(new LayerPosition(pos, type));
+  }
+  public void removeExtraInfo(LayerPosition pos){
+    localRemoveExtraInfo(pos);
+  }
+  
+  //BlockMapModule Loading/Saving/Generating
+  public boolean isLoaded(Position p){
+    return p.chunkX>=currentChunkX-cW/2 && p.chunkX<=currentChunkX+cW/2 && p.chunkY>=currentChunkY-cH/2 && p.chunkY<=currentChunkY+cH/2;
+  }
+  public void loadChunk(int chunkX,int chunkY,int arrNumX,int arrNumY){
+    File file = Input.singleton.getFile("levels/"+map_name+"/"+chunkX+"_"+chunkY+".tblock", Input.singleton.EXTERNAL);
+    if(!file.exists()){
+      BlockMapModule newArea = mg.createNewChunk(chunkX,chunkY,imported,this);
+      biome[arrNumX] = newArea.biome[1];
+      grid[arrNumX][arrNumY] = newArea.grid[1][1];
+      back[arrNumX][arrNumY] = newArea.back[1][1];
+      power[arrNumX][arrNumY] = newArea.power[1][1];
+      light[arrNumX][arrNumY] = newArea.light[1][1];
+      for(LayerPosition lPos:newArea.stateInfo.keySet())
+        localSetExtraInfo(lPos, newArea.stateInfo.get(lPos));
+      for(LayerPosition p:newArea.lightUpdatesQ)
+        addUpdates(p.pos, Type.UpdateSize.one, p.type, -1, 1);
+      return;
+    }
+    for(int loadLoop=0;loadLoop<2;loadLoop++)
+      try{
+        Scanner s = new Scanner(file);
+        if(loadLoop==0)
+          s.useLocale(Locale.CANADA);
+        int version = s.nextInt();
+        biome[arrNumX] = new int[gW];
+        grid[arrNumX][arrNumY] = new int[gW][gH];
+        back[arrNumX][arrNumY] = new int[gW][gH];
+        power[arrNumX][arrNumY] = new int[gW][gH];
+        light[arrNumX][arrNumY] = new int[gW][gH];
+        HashMap<Integer, Integer> block_mapping = new HashMap<>();
+        int old_index = 0;
+        while(true){
+          String block_name = s.next();
+          if(block_name.equals("NULL"))
+            break;
+          int new_index = BlockList.getIndex(block_name);
+          if(new_index==-1){
+            Log.w(TAG, "Block " + block_name + " couldn't be found so turning it into air");
+            block_mapping.put(old_index, BlockList.getIndex("air"));
+          }else{
+            block_mapping.put(old_index, new_index);
+          }
+          old_index++;
+        }
+        loadArray(s,biome[arrNumX], null);
+        for(int i=0;i<grid[arrNumX][arrNumY].length;i++)
+          loadArray(s, grid[arrNumX][arrNumY][i], block_mapping);
+        for(int i=0;i<back[arrNumX][arrNumY].length;i++)
+          loadArray(s, back[arrNumX][arrNumY][i], block_mapping);
+        for(int i=0;i<power[arrNumX][arrNumY].length;i++)
+          loadArray(s, power[arrNumX][arrNumY][i], null);
+        for(int i=0;i<light[arrNumX][arrNumY].length;i++)
+          loadArray(s, light[arrNumX][arrNumY][i], null);
+        
+        int stateLength = s.nextInt();
+        for(int i=0;i<stateLength;i++){
+          LayerPosition pos = new LayerPosition(new Position(chunkX, chunkY, s.nextInt(), s.nextInt()), Type.getBlockType(s.nextInt()));
+          try{
+            setExtraInfo(pos, HumanReadableSerializer.loadObject(null, s, null));
+          }catch(IllegalAccessException e){
+            Log.e(TAG, "extra data could not be loaded in chunk: "+chunkX+", "+chunkY);
+          }catch(ClassNotFoundException e){
+            Log.e(TAG, "extra data used an unidentified class in chunk: "+chunkX+", "+chunkY);
+          }
+          //getBlock(pos.pos).loadStateInfo(s, pos.pos, this);
+        }
+        
+        int lightUpdateLength = s.nextInt();
+        for(int i=0;i<lightUpdateLength;i++){
+          Position pos = new Position(chunkX, chunkY, s.nextInt(), s.nextInt());
+          addUpdates(pos, UpdateSize.one, Type.BlockType.lighting, 0);
+        }
+        
+        int updateLength = s.nextInt();
+        for(int i=0;i<updateLength;i++){
+          Position pos = new Position(chunkX, chunkY, s.nextInt(), s.nextInt());
+          addUpdates(pos, UpdateSize.one, Type.getBlockType(s.nextInt()), s.nextLong());
+        }
+        Entity entities = Entity.loadEntity("entities", s);
+        Entity global_entities = Adventure.tree.getChild("entities");
+        ArrayList<Entity> children = entities.getChildren();
+        for(int i=0;i<children.size();i++){
+          Entity child = children.get(i);
+          global_entities.addChildAs(child, null, -1, false);
+          child.init();
+        }
+        s.close();
+        break;
+      }catch(IOException e){
+        Services.singleton.logWarning(e);
+        if(loadLoop==1)
+          Log.e(TAG, "Failed to load chunk "+chunkX+", "+chunkY+" into arrNum "+arrNumX+", "+arrNumY);
+      }
+  }
+  public void loadArray(Scanner s, int[] res, HashMap<Integer,Integer> block_mapping){
+    int count = 0;
+    while(count < res.length){
+      int repeat = s.nextInt();
+      int value = block_mapping==null?s.nextInt():block_mapping.get(s.nextInt());
+      while(repeat > 0){
+        res[count] = value;
+        repeat--;
+        count++;
+      }
+    }
+    assert(count == res.length);
+  }
+  private class SaveRunnable implements Runnable{
+    private File temp_file;
+    private File file;
+    private int[] biome;
+    private int[][] grid;
+    private int[][] back;
+    private int[][] power;
+    private int[][] light;
+    private String data;
+    public SaveRunnable(File temp_file, File file, int[] biome, int[][] grid, int[][] back, int[][] power, int[][] light, String data){
+      this.temp_file = temp_file;
+      this.file = file;
+      this.biome = biome;
+      this.grid = grid;
+      this.back = back;
+      this.power = power;
+      this.light = light;
+      this.data = data;
+    }
+    public void run(){
+      try{
+        Formatter f = new Formatter(temp_file);
+        f.format(Locale.CANADA, "0\n");//version
+        for(int i=0;i<BlockList.blocks.length;i++)
+          f.format(Locale.CANADA, BlockList.blocks[i].getData().getName()+" ");
+        f.format(Locale.CANADA, "NULL \n");
+        saveArray(f, biome);
+        f.format(Locale.CANADA, "\n");
+        for(int i=0;i<grid.length;i++)
+          saveArray(f, grid[i]);
+        f.format(Locale.CANADA, "\n");
+        for(int i=0;i<back.length;i++)
+          saveArray(f, back[i]);
+        f.format(Locale.CANADA, "\n");
+        for(int i=0;i<power.length;i++)
+          saveArray(f, power[i]);
+        f.format(Locale.CANADA, "\n");
+        for(int i=0;i<light.length;i++)
+          saveArray(f, light[i]);
+        f.format(Locale.CANADA, "\n\n");
+        f.format(Locale.CANADA, data);
+
+        f.flush();
+        f.close();
+        //delete old file and replace with the new file
+        file.delete();
+        temp_file.renameTo(file);
+      }catch(FileNotFoundException e){
+        e.printStackTrace();
+      }
+
+    }
+  }
+  public Thread saveChunk(int chunkX,int chunkY,int arrNumX,int arrNumY, boolean destroy){
+    boolean profile = chunkX==-1&&chunkY==0;
+    if(profile)
+      Profiler.start("saveChunk");
+    File temp = Input.singleton.getFile("levels/"+map_name+"/."+chunkX+"_"+chunkY+".tblock", Input.singleton.EXTERNAL);
+    File file = Input.singleton.getFile("levels/"+map_name+"/"+chunkX+"_"+chunkY+".tblock", Input.singleton.EXTERNAL);
+    //try{
+      //Log.d(TAG,"Saving chunk "+chunkX+", "+chunkY+" from arrNum "+arrNumX+", "+arrNumY+" to file");
+      //Formatter f = new Formatter(temp);
+      //Blocks
+      int[] biome2;
+      int[][] grid2;
+      int[][] back2;
+      int[][] power2;
+      int[][] light2;
+      //saveArray(f, biome[arrNumX]);
+      if(destroy){
+        biome2 = biome[arrNumX];
+        grid2 = grid[arrNumX][arrNumY];
+        back2 = back[arrNumX][arrNumY];
+        power2 = power[arrNumX][arrNumY];
+        light2 = light[arrNumX][arrNumY];
+      }else{
+        biome2 = new int[biome[arrNumX].length];
+        grid2 = new int[grid[arrNumX][arrNumY].length][grid[arrNumX][arrNumY][0].length];
+        back2 = new int[back[arrNumX][arrNumY].length][back[arrNumX][arrNumY][0].length];
+        power2 = new int[power[arrNumX][arrNumY].length][power[arrNumX][arrNumY][0].length];
+        light2 = new int[light[arrNumX][arrNumY].length][light[arrNumX][arrNumY][0].length];
+        copyArray(biome[arrNumX], biome2);
+        for(int i = 0;i<grid[arrNumX][arrNumY].length;i++){
+          copyArray(grid[arrNumX][arrNumY][i], grid2[i]);
+        }
+        for(int i = 0;i<back[arrNumX][arrNumY].length;i++){
+          copyArray(back[arrNumX][arrNumY][i], back2[i]);
+        }
+        for(int i = 0;i<power[arrNumX][arrNumY].length;i++){
+          copyArray(power[arrNumX][arrNumY][i], power2[i]);
+        }
+        for(int i = 0;i<light[arrNumX][arrNumY].length;i++){
+          copyArray(light[arrNumX][arrNumY][i], light2[i]);
+        }
+      }
+      //f.format("\n");
+
+      Formatter f = new Formatter();
+      //Extra Data
+      int stateLength = 0;
+      for(LayerPosition lPos:stateInfo.keySet())
+        if(lPos.pos.chunkX == chunkX && lPos.pos.chunkY == chunkY)
+          stateLength++;
+      f.format(Locale.CANADA, "%d ", stateLength);
+      Iterator<LayerPosition> it = stateInfo.keySet().iterator();
+      while(it.hasNext()){
+        LayerPosition lPos = it.next();
+        if(lPos.pos.chunkX != chunkX || lPos.pos.chunkY != chunkY)
+          continue;
+        f.format(Locale.CANADA, "%d %d %d ", lPos.pos.x, lPos.pos.y, lPos.type.ordinal());
+        HumanReadableSerializer.saveObject(null, f, null, null, getExtraInfo(lPos), true, false, null);
+        //getBlock(lPos.pos).saveStateInfo(f, lPos.pos, this);
+        if(destroy)
+          it.remove();
+      }
+      f.format(Locale.CANADA, "\n");
+      //Lighting
+      int lightUpdateLength = 0;
+      for(LayerPosition lPos:lightUpdatesQ)
+        if(lPos.pos.chunkX == chunkX && lPos.pos.chunkY == chunkY)
+          lightUpdateLength++;
+      f.format(Locale.CANADA, "%d ", lightUpdateLength);
+      it = lightUpdatesQ.iterator();
+      while(it.hasNext()){
+        LayerPosition lPos = it.next();
+        if(lPos.pos.chunkX != chunkX || lPos.pos.chunkY != chunkY)
+          continue;
+        f.format(Locale.CANADA, "%d %d ", lPos.pos.x, lPos.pos.y);
+        if(destroy)
+          it.remove();
+      }
+      f.format(Locale.CANADA, "\n");
+      //Updates
+      int updateLength = 0;
+      for(int i=0;i<currentRequiredUpdates.length;i++)
+        for(LayerPosition lPos:currentRequiredUpdates[i])
+          if(lPos.pos.chunkX == chunkX && lPos.pos.chunkY == chunkY)
+            updateLength++;
+      for(FutureUpdate fUpdate:futureRequiredUpdates)
+        if(fUpdate.pos.pos.chunkX == chunkX && fUpdate.pos.pos.chunkY == chunkY)
+          updateLength++;
+      f.format(Locale.CANADA, "%d ", updateLength);
+      int currentTickOffset = (int)(Time.totalTicks%currentRequiredUpdates.length);
+      for(int i=0;i<currentRequiredUpdates.length;i++){
+        long future = Time.totalTicks + (currentRequiredUpdates.length + i - currentTickOffset)%currentRequiredUpdates.length;
+        it = currentRequiredUpdates[i].iterator();
+        while(it.hasNext()){
+          LayerPosition lPos = it.next();
+          if(lPos.pos.chunkX != chunkX || lPos.pos.chunkY != chunkY)
+            continue;
+          f.format(Locale.CANADA, "%d %d %d %d ", lPos.pos.x, lPos.pos.y, lPos.type.ordinal(), future);
+          if(destroy)
+            it.remove();
+        }
+      }
+      Iterator<FutureUpdate> it2 = futureRequiredUpdates.iterator();
+      while(it2.hasNext()){
+        FutureUpdate fUpdate = it2.next();
+        if(fUpdate.pos.pos.chunkX != chunkX || fUpdate.pos.pos.chunkY != chunkY)
+          continue;
+        f.format(Locale.CANADA, "%d %d %d %d ", fUpdate.pos.pos.x, fUpdate.pos.pos.y, fUpdate.pos.type.ordinal(), fUpdate.time);
+        if(destroy)
+          it2.remove();
+      }
+      f.format(Locale.CANADA, "\n\n");
+      //Entities
+      Entity tree_entities = Adventure.tree.getChild("entities");
+      Entity local_entities = new Entity("entities");
+      local_entities.init();
+      ArrayList<Entity> list = new ArrayList<Entity>();
+      while(Sync.setNeedA(true));
+      for(Physics2DModule module:Physics.getEntityIterator(new Point2F(chunkX*gW, chunkY*gH), new Point2F((chunkX+1)*gW,(chunkY+1)*gH))){
+        Entity e = module.getE();
+        tree_entities.removeChildNoDestroy(e, true);
+        local_entities.addChildAs(e, null, -1, true);
+        list.add(e);
+      }
+      local_entities.destroy_only(true);
+      if(profile)
+        Profiler.start("saveChunk_entitySave");
+      local_entities.saveEntity("entities", f);
+      if(profile)
+        Profiler.end("saveChunk_entitySave");
+      if(!destroy){
+        while(local_entities.getChildren().size()>0){
+          Entity e  = local_entities.getChildren().get(local_entities.getChildren().size()-1);
+          local_entities.removeChildNoDestroy(e, true);
+          tree_entities.addChildAs(e, null, -1, true);
+        }
+      }
+      Sync.setNeedA(false);
+      //for(Entity e:list)
+      //  e.destroy(true);
+      f.flush();
+      Appendable data = f.out();
+      f.close();
+      //delete old file and replace with the new file
+      //file.delete();
+      //temp.renameTo(file);
+    //}catch(IOException e){
+    //  Log.e(TAG, "Failed to save chunk "+chunkX+", "+chunkY);
+    //}
+    Thread thread = new Thread(new SaveRunnable(temp, file, biome2, grid2, back2, power2, light2, data.toString()));
+    if(profile)
+      Profiler.end("saveChunk");
+    return thread;
+  }
+  public static void copyArray(int[] src, int[] dest){
+    System.arraycopy(src, 0, dest, 0, src.length);
+  }
+  public static void saveArray(Formatter f, int[] res){
+    int count = 1;
+    int currentNum = res[0];
+    StringBuilder b = new StringBuilder();
+    for(int i=1;i<res.length;i++)
+      if(currentNum == res[i])
+        count++;
+      else{
+        b.append(count);
+        b.append(" ");
+        b.append(currentNum);
+        b.append(" ");
+        currentNum = res[i];
+        count=1;
+      }
+    b.append(count);
+    b.append(" ");
+    b.append(currentNum);
+    b.append(" ");
+    f.format(Locale.CANADA, b.toString());
+  }
+  private static int loadMapCounter = 0;
+  public void loadMap(){
+    long time = System.nanoTime();
+    Services.singleton.analytics("loadMap_begin", loadMapCounter++);
+    Adventure.loading = 0f;
+    //Load from config files
+    File f = Input.singleton.getFile("levels/"+map_name+"/"+"config.txt", Input.singleton.EXTERNAL);
+    if(f.exists()){
+      try {
+        Scanner s = new Scanner(f);
+        s.useLocale(Locale.CANADA);
+        seed = s.nextLong();
+        difficulty = s.nextInt();
+        precipitation = s.nextBoolean();
+        Time.totalTicks = s.nextLong();
+        currentChunkX = s.nextInt();
+        currentChunkY = s.nextInt();
+        entNum = s.nextInt();
+        while(s.hasNext()){
+          String option = s.next();
+          switch(option){
+            case "imported":imported = s.nextBoolean();break;
+            default:Log.e(TAG,"Invalid information '"+option+"' in levels/"+map_name+"/config.txt");
+          }
+        }
+        s.close();
+      } catch (FileNotFoundException e) {
+        Log.e(TAG, "world folder '"+map_name+"' exists but config.txt does not");
+      }
+    }else{
+      Time.totalTicks=0;
+      if(map_name.equals("Tutorial")){
+        seed = 15;//12
+      }else{
+        Input.singleton.getFile("levels/" + map_name, Input.singleton.EXTERNAL).mkdirs();
+        while(seed==0)
+          seed=new Random().nextLong();
+      }
+      if(imported){
+        ((TerrablockMapGenerator)mg).importPlayer(map_name);
+        currentChunkX = (int)Math.floor(GuiLib.player.getE().pos.x/gW);
+        currentChunkY = (int)Math.floor(GuiLib.player.getE().pos.y/gH);
+      }
+    }
+
+    //LoadChunks
+    for(int i=0;i<cW;i++)
+      for(int j=0;j<cH;j++){
+        loadChunk(currentChunkX - cW/2 + i, currentChunkY - cH/2 + j, i, j);
+        Adventure.loading += 1f/(cW*cH);
+      }
+    time = System.nanoTime()-time;
+    Services.singleton.analytics("loadMap", time/1e9f);
+    Adventure.loading = 1f;
+  }
+  public void saveMap(boolean destroy){
+    LinkedList<Thread> threads = new LinkedList<>();
+    for(int i=0;i<cW;i++)
+      for(int j=0;j<cH;j++)
+        threads.add(saveChunk(currentChunkX-cW/2+i, currentChunkY-cH/2+j, i, j, destroy));
+    if(!map_name.equals("Tutorial")){
+      Services.singleton.startParallelService(threads);
+      try{
+        Formatter f=new Formatter(Input.singleton.getFile("levels/" + map_name + "/" + "config.txt", Input.singleton.EXTERNAL));
+        f.format(Locale.CANADA, "%d\n", seed);
+        f.format(Locale.CANADA, "%d\n", difficulty);
+        f.format(Locale.CANADA, "%b\n", precipitation);
+        f.format(Locale.CANADA, "%d\n", Time.totalTicks);
+        f.format(Locale.CANADA, "%d\n", currentChunkX);
+        f.format(Locale.CANADA, "%d\n", currentChunkY);
+        f.format(Locale.CANADA, "%d\n", entNum);
+        f.format(Locale.CANADA, "%s %b\n", "imported", imported);
+        f.flush();
+        f.close();
+      }catch(IOException e){
+        Log.e(TAG, "Could not load current world config data");
+      }
+    }
+  }
+  public void moveToChunk(int chunkX, int chunkY){
+    int translateX = chunkX - currentChunkX;
+    int translateY = chunkY - currentChunkY;
+    LinkedList<Thread> threads = new LinkedList<>();
+    for(int i=0;i<cW;i++)
+      for(int j=0;j<cH;j++)
+        //if(cW/2 < Math.abs(currentChunkX-cW/2+i - chunkX) || cH/2 < Math.abs(currentChunkY-cH/2+j - chunkY))
+        //took this out since it may cause de-synchronization upon crash (worst case is loss of player)
+        threads.add(saveChunk(currentChunkX-cW/2+i,currentChunkY-cH/2+j,i,j, cW/2 < Math.abs(currentChunkX-cW/2+i - chunkX) || cH/2 < Math.abs(currentChunkY-cH/2+j - chunkY)));
+    if(threads.size()!=0 && !map_name.equals("Tutorial"))
+      Services.singleton.startParallelService(threads);
+
+    currentChunkX = chunkX;
+    currentChunkY = chunkY;
+    
+    for(int i=(translateX>=0?0:cW-1);(translateX>=0?i<cW:i>=0);i+=(translateX>=0?1:-1))
+      for(int j=(translateY>=0?0:cH-1);(translateY>=0?j<cH:j>=0);j+=(translateY>=0?1:-1)){
+        int srcX = translateX + i;
+        int srcY = translateY + j;
+        if(srcX>=0 && srcX<cW && srcY>=0 && srcY<cH){
+          //Log.d(TAG, "moving arrNum "+srcX+", "+srcY+" to "+i+", "+j);
+          biome[i] = biome[srcX];
+          grid[i][j] = grid[srcX][srcY];
+          back[i][j] = back[srcX][srcY];
+          power[i][j] = power[srcX][srcY];
+          light[i][j] = light[srcX][srcY];
+        }else{
+          loadChunk(chunkX-cW/2+i,chunkY-cH/2+j,i,j);
+        }
+      }
+   }
+  
+  public Block localGetBlock(int chunkX, int chunkY, int x, int y){
+    return BlockList.blocks[grid[chunkX][chunkY][x][y]];
+  }
+  public void localSetBlock(int chunkX, int chunkY, int x, int y, Block block){
+    grid[chunkX][chunkY][x][y] = block.getData().number;
+  }
+  public Block localGetBackground(int chunkX, int chunkY, int x, int y){
+    return BlockList.blocks[back[chunkX][chunkY][x][y]];
+  }
+  public void localSetBackground(int chunkX, int chunkY, int x, int y, Block block){
+    back[chunkX][chunkY][x][y] = block.getData().number;
+  }
+  public int localGetPower(int chunkX, int chunkY, int x, int y){
+    return power[chunkX][chunkY][x][y];
+  }
+  public void localSetPower(int chunkX, int chunkY, int x, int y, int block){
+    power[chunkX][chunkY][x][y] = block;
+  }
+  public int localGetLight(int chunkX, int chunkY, int x, int y){
+    return light[chunkX][chunkY][x][y];
+  }
+  public void localSetLight(int chunkX, int chunkY, int x, int y, int value){
+    light[chunkX][chunkY][x][y] = value;
+  }
+  public int localGetBiome(int chunkX, int chunkY, int x, int y){
+    return biome[chunkX][x];
+  }
+  
+  public void localAttemptSetBlock(int chunkX, int chunkY, int x, int y, Block b){
+    if(chunkX >= 0 && chunkX < grid.length && chunkY >= 0 && chunkY < grid[0].length)
+      grid[chunkX][chunkY][x][y] = b.getData().number;
+  }
+  public int localAttemptGetBlockInt(int chunkX, int chunkY, int x, int y){
+    if(chunkX >= 0 && chunkX < grid.length && chunkY >= 0 && chunkY < grid[0].length)
+      return grid[chunkX][chunkY][x][y];
+    return 0;
+  }
+  public void localAttemptSetBiomeInt(int chunkX, int chunkY, int x, int y, int biome){
+    if(chunkX >= 0 && chunkX < grid.length && chunkY >= 0 && chunkY < grid[0].length)
+      this.biome[chunkX][x] = biome;
+  }
+  public int localAttemptGetBiomeInt(int chunkX, int chunkY, int x, int y){
+    if(chunkX >= 0 && chunkX < biome.length && chunkY >= 0 && chunkY < biome[0].length)
+      return biome[chunkX][x];
+    return 0;
+  }
+  public void localAttemptSetBackground(int chunkX, int chunkY, int x, int y, Block b){
+    if(chunkX >= 0 && chunkX < grid.length && chunkY >= 0 && chunkY < grid[0].length)
+      back[chunkX][chunkY][x][y] = b.getData().number;
+  }
+  public int localAttemptGetBackgroundInt(int chunkX, int chunkY, int x, int y){
+    if(chunkX >= 0 && chunkX < back.length && chunkY >= 0 && chunkY < back[0].length)
+      return back[chunkX][chunkY][x][y];
+    return 0;
+  }
+  public void localAttemptSetLight(int chunkX, int chunkY, int x, int y, int l){
+    if(chunkX >= 0 && chunkX < light.length && chunkY >= 0 && chunkY < light[0].length)
+      light[chunkX][chunkY][x][y] = l;
+  }
+
+  public void localSetExtraInfo(LayerPosition pos, Object data){
+    if(stateInfo.containsKey(pos))
+      stateInfo.put(pos, data);
+    else
+      stateInfo.put(pos.clone(), data);
+  }
+  public Object localGetExtraInfo(LayerPosition pos){
+    return stateInfo.get(pos);
+  }
+  public void localRemoveExtraInfo(LayerPosition pos){
+    stateInfo.remove(pos);
+  }
+
+
+  
+  //Update bookkeeping
+  public void updateBlocks(){
+    Profiler.start("updateBlocks");
+    long time = System.currentTimeMillis();
+    int index = (int)(Time.totalTicks%currentRequiredUpdates.length);
+    while(!currentRequiredUpdates[index].isEmpty()){
+      HashSet<LayerPosition> temp = currentRequiredUpdates[index];
+      currentRequiredUpdates[index] = new HashSet<LayerPosition>();
+      Iterator<LayerPosition> it = temp.iterator();
+      while(it.hasNext()){
+        LayerPosition update = it.next();
+        updateBlock(update);
+      }
+    }
+    while (lightUpdatesQ.size() != 0) {
+      LayerPosition update = lightUpdatesQ.remove();
+      updateBlock(update);
+      lightUpdates.remove(update);
+      if(System.currentTimeMillis() - time > 5){//cap the amount of time used on light updates
+        break;
+      }
+    }
+    assert(currentRequiredUpdates[index].isEmpty());
+    Iterator<FutureUpdate> it = futureRequiredUpdates.iterator();
+    while(it.hasNext()){
+      FutureUpdate update = it.next();
+      if(update.time <= Time.totalTicks+currentRequiredUpdates.length){
+        currentRequiredUpdates[(int)(update.time%currentRequiredUpdates.length)].add(update.pos);
+        it.remove();
+      }
+    }
+    Profiler.end("updateBlocks");
+  }
+  private void updateBlock(LayerPosition update){
+    if(!isLoaded(update.pos))
+      return;
+    switch(update.type){
+    case wiring:
+      getBlock(update.pos).getData().superPowerUpdate(update.pos, this);
+      break;
+    case lighting:
+      getBlock(update.pos).getData().lightUpdate(update.pos, this);
+      break;
+    case foreground:
+      getBlock(update.pos).getData().blockUpdate(update.pos, this);
+      break;
+    case background:
+      getBackground(update.pos).getData().blockUpdate(update.pos, this);
+      break;
+    }
+  }
+  public void addUpdates(Position pos, Type.UpdateSize size, Type.BlockType type, int delay, int forceTiming){
+    long time = Time.totalTicks + delay;
+    time += forceTiming - (time-1)%forceTiming - 1;
+    addUpdates(pos, size, type, time);
+  }
+  public void addUpdates(Position pos, Type.UpdateSize size, Type.BlockType type, long time){
+    Position pos2 = new Position();
+    switch(size){
+    case none:break;
+    case one:
+      addUpdate(pos, type, time);
+      break;
+    case adjacent2:
+      addUpdate(pos.getTranslation(pos2, 2, 1), type, time);
+      addUpdate(pos.getTranslation(pos2, 2, -1), type, time);
+      addUpdate(pos.getTranslation(pos2, -2, -1), type, time);
+      addUpdate(pos.getTranslation(pos2, -2, 1), type, time);
+      addUpdate(pos.getTranslation(pos2, 1, 2), type, time);
+      addUpdate(pos.getTranslation(pos2, 1, -2), type, time);
+      addUpdate(pos.getTranslation(pos2, -1, -2), type, time);
+      addUpdate(pos.getTranslation(pos2, -1, 2), type, time);
+    case adjacentCorners:
+      addUpdate(pos.getTranslation(pos2, 1, 1), type, time);
+      addUpdate(pos.getTranslation(pos2, 1, -1), type, time);
+      addUpdate(pos.getTranslation(pos2, -1, -1), type, time);
+      addUpdate(pos.getTranslation(pos2, -1, 1), type, time);
+    case adjacent:
+      addUpdate(pos.getTranslation(pos2, 1, 0), type, time);
+      addUpdate(pos.getTranslation(pos2, -1, 0), type, time);
+      addUpdate(pos.getTranslation(pos2, 0, 1), type, time);
+      addUpdate(pos.getTranslation(pos2, 0, -1), type, time);
+    }
+  }
+  private void addUpdate(Position pos, Type.BlockType type, long time){
+    LayerPosition updatePos = new LayerPosition(pos.clone(), type);
+    if(type == Type.BlockType.lighting){
+      if(lightUpdates.add(updatePos))
+        lightUpdatesQ.add(updatePos);
+    }else if(time < Time.totalTicks + currentRequiredUpdates.length)
+      currentRequiredUpdates[(int)(time%currentRequiredUpdates.length)].add(updatePos);
+    else
+      futureRequiredUpdates.add(new FutureUpdate(updatePos, time));
+  }
+  public class FutureUpdate{
+    LayerPosition pos;
+    Long time;
+    FutureUpdate(LayerPosition pos, Long time){
+      this.pos = pos;
+      this.time = time;
+    }
+  }
+}
